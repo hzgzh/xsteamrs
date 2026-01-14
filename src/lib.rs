@@ -1,16 +1,19 @@
-//! IAPWS-IF97 水/水蒸气物性计算（Rust）
+//! IAPWS-IF97 water/steam properties (Rust)
 //!
-//! 这份库提供两种调用方式：
+//! This crate provides two ways to call into the implementation:
 //!
-//! - **面向 IF97 的底层函数**：以 Region 为单位的 `*_p_t` / `*_rho_t` 等函数，输入输出均为 IF97 常用 SI 单位（`p: MPa`、`T: K`、`h/u: kJ/kg`、`s: kJ/(kg·K)`、`v: m³/kg`）。
-//! - **对外接口**：[`props`] / [`props_si`]，通过字符串函数名（如 `"h_pT"`、`"T_ph"`）做分发。
-//!   - [`props`]：单位与 XSteam.m 默认一致（`p: bar`、`T: °C`，其余大多为 IF97 SI 单位）
-//!   - [`props_si`]：输入为国际单位制（`p: Pa`、`T: K`，其余同 IF97 常用 SI 单位）；且温度输出为 `K`、压力输出为 `Pa`
+//! - **IF97 low-level functions**: region-based `*_p_t` / `*_rho_t` functions, using IF97
+//!   conventional SI units (`p: MPa`, `T: K`, `h/u: kJ/kg`, `s: kJ/(kg·K)`, `v: m³/kg`).
+//! - **Public string-dispatch API**: [`props`] / [`props_si`], dispatching by a function name string
+//!   (e.g. `"h_pT"`, `"T_ph"`).
+//!   - [`props`]: XSteam.m-style default units (`p: bar`, `T: °C`, most others follow IF97 SI units)
+//!   - [`props_si`]: SI inputs (`p: Pa`, `T: K`, others follow IF97 SI units); temperature outputs
+//!     in `K` and pressure outputs in `Pa`
 //!
-//! # 快速上手：用 XSteam 风格接口
+//! # Quick start: XSteam-style API
 //!
-//! - 函数名大小写不敏感，会做 `trim()` + `to_ascii_lowercase()`
-//! - 不同函数名对应的输入单位不同（下面表格给出最常见的几类）
+//! - Function names are case-insensitive; the implementation applies `trim()` + `to_ascii_lowercase()`.
+//! - Input units depend on the selected function name (the table below shows the most common subset).
 //!
 //! ```no_run
 //! use xsteamrs::props;
@@ -19,69 +22,73 @@
 //!     if b == 0.0 { (a - b).abs() <= rel } else { ((a - b) / b).abs() <= rel }
 //! }
 //!
-//! // 例1：给定压力( bar )与温度( °C )，求比焓 h (kJ/kg)
+//! // Example 1: p(bar) + T(°C) -> h(kJ/kg)
 //! let h = props("h_pT", 1.0, 100.0).unwrap();
 //! assert!(rel_close(h, 2_675.0, 1e-3));
 //!
-//! // 例2：给定压力( bar )与比焓( kJ/kg )，求温度( °C )
+//! // Example 2: p(bar) + h(kJ/kg) -> T(°C)
 //! let t_c = props("T_ph", 1.0, 100.0).unwrap();
 //! assert!(t_c.is_finite());
 //! ```
 //!
-//! ## XSteam 风格接口的单位约定（常用子集）
+//! ## XSteam-style units (common subset)
 //!
-//! - `*_p*`：`p` 用 **bar**
-//! - `*_T*` / `*_t*`：`T` 用 **°C**（注意：底层 IF97 函数使用 K）
+//! - `*_p*`: `p` in **bar**
+//! - `*_T*` / `*_t*`: `T` in **°C** (note: low-level IF97 functions use K)
 //! - `h/u`：**kJ/kg**
 //! - `s`：**kJ/(kg·K)**
 //! - `v`：**m³/kg**
 //! - `rho`：**kg/m³**
 //! - `Cp/Cv`：**kJ/(kg·K)**
 //! - `w`：**m/s**
-//! - `my`（动力黏度）：按 XSteam.m 默认输出（通常为 `Pa·s`）
-//! - `tc`（导热系数）：按 XSteam.m 默认输出（通常为 `W/(m·K)`）
-//! - `st`（表面张力）：按 XSteam.m 默认输出（通常为 `N/m`）
+//! - `my` (dynamic viscosity): XSteam.m default output (typically `Pa·s`)
+//! - `tc` (thermal conductivity): XSteam.m default output (typically `W/(m·K)`)
+//! - `st` (surface tension): XSteam.m default output (typically `N/m`)
 //!
-//! 支持的函数名集合与 XSteam.m 的公开接口一致，可参考
-//! [XSteam.m#L3826-L3829](file:///d:/5.code/xsteamrs/XSteam.m#L3826-L3829) 的 `fun` 列表。
+//! The supported function names match the public interface in XSteam.m. See the `fun` list in
+//! [XSteam.m#L3826-L3829](file:///d:/5.code/xsteamrs/XSteam.m#L3826-L3829).
 //!
-//! # 使用底层 IF97 函数（更类型/单位明确）
+//! # Using low-level IF97 functions (more explicit types/units)
 //!
-//! 底层函数通常以 `p_mpa` 与 `t_k` 命名参数，避免混淆单位：
-//! - 如果只知道 `(p, T)`：先用 [`region_from_p_t`] 判区，再调用 `h1_p_t` / `h2_p_t` / `h3_p_t` / `h5_p_t` 等
-//! - 如果只知道 `(p, h)`：先用 [`region_from_p_h`] 判区，再调用 `t1_p_h` / `t2_p_h` / `t3_p_h` / `t5_p_h` 等
-//! - 如果只知道 `(p, s)`：先用 [`region_from_p_s`] 判区，再调用 `t1_p_s` / `t2_p_s` / `t3_p_s` / `t5_p_s` 等
+//! Low-level functions typically use parameter names like `p_mpa` and `t_k` to avoid unit
+//! confusion:
+//! - If you only know `(p, T)`: call [`region_from_p_t`] and then `h1_p_t` / `h2_p_t` / `h3_p_t` /
+//!   `h5_p_t`, etc.
+//! - If you only know `(p, h)`: call [`region_from_p_h`] and then `t1_p_h` / `t2_p_h` / `t3_p_h` /
+//!   `t5_p_h`, etc.
+//! - If you only know `(p, s)`: call [`region_from_p_s`] and then `t1_p_s` / `t2_p_s` / `t3_p_s` /
+//!   `t5_p_s`, etc.
 //!
 //! ```no_run
 //! use xsteamrs::{h1_p_t, psat_mpa_from_t_k};
 //!
-//! // 饱和压力：输入 T(K)，输出 p(MPa)
+//! // Saturation pressure: input T(K), output p(MPa)
 //! let p_sat = psat_mpa_from_t_k(373.15).unwrap();
 //! assert!(p_sat > 0.0);
 //!
-//! // Region1：输入 p(MPa), T(K)，输出 h(kJ/kg)
+//! // Region 1: input p(MPa), T(K), output h(kJ/kg)
 //! let h = h1_p_t(0.101_325, 373.15).unwrap();
 //! assert!(h.is_finite());
 //! ```
 //!
-//! # 错误处理
+//! # Error handling
 //!
-//! 推荐使用 [`props`] / [`props_si`] 返回的 [`If97Result`] 显式处理错误。
+//! Prefer handling errors explicitly via [`If97Result`] returned by [`props`] / [`props_si`].
 //!
 #[derive(Debug, Clone, Copy, PartialEq)]
-/// IF97 计算过程中可能出现的错误。
+/// Errors that may occur during IF97 calculations.
 pub enum If97Error {
-    /// 输入为 `NaN` 或 `±Inf`。
+    /// Input is `NaN` or `±Inf`.
     NonFiniteInput,
-    /// 温度（K）超出 IF97 支持范围。
+    /// Temperature (K) is outside the supported IF97 range.
     TemperatureOutOfRange { t_k: f64 },
-    /// 压力（MPa）超出 IF97 支持范围。
+    /// Pressure (MPa) is outside the supported IF97 range.
     PressureOutOfRange { p_mpa: f64 },
-    /// 计算中间量无效（如超出公式适用域、迭代不收敛、溢出等）。
+    /// Invalid intermediate value (out of correlation domain, non-convergent iteration, overflow, etc.).
     InvalidIntermediateValue,
 }
 
-/// IF97 计算结果类型。
+/// IF97 result type.
 pub type If97Result<T> = Result<T, If97Error>;
 
 fn sqrt_nonneg(x: f64) -> If97Result<f64> {
@@ -97,9 +104,9 @@ fn sqrt_nonneg(x: f64) -> If97Result<f64> {
     Ok(x.sqrt())
 }
 
-/// 给定温度 `T`（K），计算饱和压力 `psat`（MPa）。
+/// Given temperature `T` (K), compute saturation pressure `psat` (MPa).
 ///
-/// 适用范围：`273.15..=647.096 K`。
+/// Valid range: `273.15..=647.096 K`.
 pub fn psat_mpa_from_t_k(t_k: f64) -> If97Result<f64> {
     if !t_k.is_finite() {
         return Err(If97Error::NonFiniteInput);
@@ -125,9 +132,9 @@ pub fn psat_mpa_from_t_k(t_k: f64) -> If97Result<f64> {
     Ok(p)
 }
 
-/// 给定饱和压力 `p`（MPa），计算饱和温度 `Tsat`（K）。
+/// Given saturation pressure `p` (MPa), compute saturation temperature `Tsat` (K).
 ///
-/// 适用范围：约 `0.000611..=22.06395 MPa`。
+/// Valid range: about `0.000611..=22.06395 MPa`.
 pub fn tsat_k_from_p_mpa(p_mpa: f64) -> If97Result<f64> {
     if !p_mpa.is_finite() {
         return Err(If97Error::NonFiniteInput);
@@ -157,12 +164,12 @@ pub fn tsat_k_from_p_mpa(p_mpa: f64) -> If97Result<f64> {
     Ok(t)
 }
 
-/// XSteam 风格：给定温度 `T`（°C），计算饱和压力 `psat`（bar）。
+/// XSteam-style: given temperature `T` (°C), compute saturation pressure `psat` (bar).
 pub fn psat_bar_from_t_c(t_c: f64) -> If97Result<f64> {
     psat_mpa_from_t_k(t_c + 273.15).map(|p_mpa| p_mpa * 10.0)
 }
 
-/// XSteam 风格：给定饱和压力 `p`（bar），计算饱和温度 `Tsat`（°C）。
+/// XSteam-style: given saturation pressure `p` (bar), compute saturation temperature `Tsat` (°C).
 pub fn tsat_c_from_p_bar(p_bar: f64) -> If97Result<f64> {
     tsat_k_from_p_mpa(p_bar / 10.0).map(|t_k| t_k - 273.15)
 }
@@ -990,20 +997,149 @@ fn surface_tension_t(t_k: f64) -> If97Result<f64> {
     Ok(st)
 }
 
-/// 对外接口（XSteam 单位：bar / °C）。
+/// Public string-dispatch API (XSteam units: bar / °C).
 ///
-/// - `fun`：函数名（大小写不敏感，内部会 `trim()` + `to_ascii_lowercase()`）
-/// - `in1`/`in2`：与 `fun` 对应的两个输入参数（单位遵循 XSteam.m 约定）
-/// - 返回值：成功时为对应物性值；失败时返回 [`If97Error`]
+/// - `fun`: function name (case-insensitive; internally `trim()` + `to_ascii_lowercase()`)
+/// - `in1`/`in2`: the two inputs corresponding to `fun` (units follow XSteam.m conventions)
+/// - Return value: the requested property on success; [`If97Error`] on failure
 ///
-/// 常见单位约定：
-/// - `p`：bar
-/// - `T`：°C
-/// - `h/u`：kJ/kg
-/// - `s`：kJ/(kg·K)
+/// Common unit conventions:
+/// - `p`: bar
+/// - `T`: °C
+/// - `h/u`: kJ/kg
+/// - `s`: kJ/(kg·K)
 ///
-/// 支持的函数名集合可参考
-/// [XSteam.m#L3826-L3829](file:///d:/5.code/xsteamrs/XSteam.m#L3826-L3829)。
+/// # Supported function names
+///
+/// All names are case-insensitive. The table uses XSteam-style capitalization (e.g. `h_pT`), but
+/// `h_pt` / `H_PT` / `  h_pT ` all work the same.
+///
+/// ## Saturation and state conversion
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `Tsat_p` | `p` (bar) | - | `Tsat` (°C) | Saturation temperature at pressure |
+/// | `psat_T` | `T` (°C) | - | `psat` (bar) | Saturation pressure at temperature |
+/// | `T_ph` | `p` (bar) | `h` (kJ/kg) | `T` (°C) | Temperature from pressure and enthalpy |
+/// | `T_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `T` (°C) | Temperature from pressure and entropy |
+/// | `T_hs` | `h` (kJ/kg) | `s` (kJ/(kg·K)) | `T` (°C) | Temperature from enthalpy and entropy |
+/// | `p_hs` | `h` (kJ/kg) | `s` (kJ/(kg·K)) | `p` (bar) | Pressure from enthalpy and entropy |
+///
+/// ## Enthalpy `h`
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `hV_p` | `p` (bar) | - | `h` (kJ/kg) | Saturated vapor enthalpy at pressure |
+/// | `hL_p` | `p` (bar) | - | `h` (kJ/kg) | Saturated liquid enthalpy at pressure |
+/// | `hV_T` | `T` (°C) | - | `h` (kJ/kg) | Saturated vapor enthalpy at temperature |
+/// | `hL_T` | `T` (°C) | - | `h` (kJ/kg) | Saturated liquid enthalpy at temperature |
+/// | `h_pT` | `p` (bar) | `T` (°C) | `h` (kJ/kg) | Enthalpy from pressure and temperature |
+/// | `h_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `h` (kJ/kg) | Enthalpy from pressure and entropy |
+/// | `h_px` | `p` (bar) | `x` (-) | `h` (kJ/kg) | Enthalpy from pressure and quality |
+/// | `h_prho` | `p` (bar) | `rho` (kg/m³) | `h` (kJ/kg) | Enthalpy from pressure and density |
+/// | `h_Tx` | `T` (°C) | `x` (-) | `h` (kJ/kg) | Enthalpy from temperature and quality |
+///
+/// ## Specific volume `v` and density `rho`
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `vV_p` | `p` (bar) | - | `v` (m³/kg) | Saturated vapor specific volume at pressure |
+/// | `vL_p` | `p` (bar) | - | `v` (m³/kg) | Saturated liquid specific volume at pressure |
+/// | `vV_T` | `T` (°C) | - | `v` (m³/kg) | Saturated vapor specific volume at temperature |
+/// | `vL_T` | `T` (°C) | - | `v` (m³/kg) | Saturated liquid specific volume at temperature |
+/// | `v_pT` | `p` (bar) | `T` (°C) | `v` (m³/kg) | Specific volume from pressure and temperature |
+/// | `v_ph` | `p` (bar) | `h` (kJ/kg) | `v` (m³/kg) | Specific volume from pressure and enthalpy |
+/// | `v_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `v` (m³/kg) | Specific volume from pressure and entropy |
+/// | `rhoV_p` | `p` (bar) | - | `rho` (kg/m³) | Saturated vapor density at pressure |
+/// | `rhoL_p` | `p` (bar) | - | `rho` (kg/m³) | Saturated liquid density at pressure |
+/// | `rhoV_T` | `T` (°C) | - | `rho` (kg/m³) | Saturated vapor density at temperature |
+/// | `rhoL_T` | `T` (°C) | - | `rho` (kg/m³) | Saturated liquid density at temperature |
+/// | `rho_pT` | `p` (bar) | `T` (°C) | `rho` (kg/m³) | Density from pressure and temperature |
+/// | `rho_ph` | `p` (bar) | `h` (kJ/kg) | `rho` (kg/m³) | Density from pressure and enthalpy |
+/// | `rho_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `rho` (kg/m³) | Density from pressure and entropy |
+///
+/// ## Entropy `s`
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `sV_p` | `p` (bar) | - | `s` (kJ/(kg·K)) | Saturated vapor entropy at pressure |
+/// | `sL_p` | `p` (bar) | - | `s` (kJ/(kg·K)) | Saturated liquid entropy at pressure |
+/// | `sV_T` | `T` (°C) | - | `s` (kJ/(kg·K)) | Saturated vapor entropy at temperature |
+/// | `sL_T` | `T` (°C) | - | `s` (kJ/(kg·K)) | Saturated liquid entropy at temperature |
+/// | `s_pT` | `p` (bar) | `T` (°C) | `s` (kJ/(kg·K)) | Entropy from pressure and temperature |
+/// | `s_ph` | `p` (bar) | `h` (kJ/kg) | `s` (kJ/(kg·K)) | Entropy from pressure and enthalpy |
+///
+/// ## Internal energy `u`
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `uV_p` | `p` (bar) | - | `u` (kJ/kg) | Saturated vapor internal energy at pressure |
+/// | `uL_p` | `p` (bar) | - | `u` (kJ/kg) | Saturated liquid internal energy at pressure |
+/// | `uV_T` | `T` (°C) | - | `u` (kJ/kg) | Saturated vapor internal energy at temperature |
+/// | `uL_T` | `T` (°C) | - | `u` (kJ/kg) | Saturated liquid internal energy at temperature |
+/// | `u_pT` | `p` (bar) | `T` (°C) | `u` (kJ/kg) | Internal energy from pressure and temperature |
+/// | `u_ph` | `p` (bar) | `h` (kJ/kg) | `u` (kJ/kg) | Internal energy from pressure and enthalpy |
+/// | `u_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `u` (kJ/kg) | Internal energy from pressure and entropy |
+///
+/// ## Heat capacities `Cp` / `Cv`
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `CpV_p` | `p` (bar) | - | `Cp` (kJ/(kg·K)) | Saturated vapor isobaric heat capacity at pressure |
+/// | `CpL_p` | `p` (bar) | - | `Cp` (kJ/(kg·K)) | Saturated liquid isobaric heat capacity at pressure |
+/// | `CpV_T` | `T` (°C) | - | `Cp` (kJ/(kg·K)) | Saturated vapor isobaric heat capacity at temperature |
+/// | `CpL_T` | `T` (°C) | - | `Cp` (kJ/(kg·K)) | Saturated liquid isobaric heat capacity at temperature |
+/// | `Cp_pT` | `p` (bar) | `T` (°C) | `Cp` (kJ/(kg·K)) | Isobaric heat capacity from pressure and temperature |
+/// | `Cp_ph` | `p` (bar) | `h` (kJ/kg) | `Cp` (kJ/(kg·K)) | Isobaric heat capacity from pressure and enthalpy |
+/// | `Cp_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `Cp` (kJ/(kg·K)) | Isobaric heat capacity from pressure and entropy |
+/// | `CvV_p` | `p` (bar) | - | `Cv` (kJ/(kg·K)) | Saturated vapor isochoric heat capacity at pressure |
+/// | `CvL_p` | `p` (bar) | - | `Cv` (kJ/(kg·K)) | Saturated liquid isochoric heat capacity at pressure |
+/// | `CvV_T` | `T` (°C) | - | `Cv` (kJ/(kg·K)) | Saturated vapor isochoric heat capacity at temperature |
+/// | `CvL_T` | `T` (°C) | - | `Cv` (kJ/(kg·K)) | Saturated liquid isochoric heat capacity at temperature |
+/// | `Cv_pT` | `p` (bar) | `T` (°C) | `Cv` (kJ/(kg·K)) | Isochoric heat capacity from pressure and temperature |
+/// | `Cv_ph` | `p` (bar) | `h` (kJ/kg) | `Cv` (kJ/(kg·K)) | Isochoric heat capacity from pressure and enthalpy |
+/// | `Cv_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `Cv` (kJ/(kg·K)) | Isochoric heat capacity from pressure and entropy |
+///
+/// ## Speed of sound `w`
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `wV_p` (alias `wVV_p`) | `p` (bar) | - | `w` (m/s) | Saturated vapor speed of sound at pressure |
+/// | `wL_p` (alias `wVL_p`) | `p` (bar) | - | `w` (m/s) | Saturated liquid speed of sound at pressure |
+/// | `wV_T` | `T` (°C) | - | `w` (m/s) | Saturated vapor speed of sound at temperature |
+/// | `wL_T` | `T` (°C) | - | `w` (m/s) | Saturated liquid speed of sound at temperature |
+/// | `w_pT` | `p` (bar) | `T` (°C) | `w` (m/s) | Speed of sound from pressure and temperature |
+/// | `w_ph` | `p` (bar) | `h` (kJ/kg) | `w` (m/s) | Speed of sound from pressure and enthalpy |
+/// | `w_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `w` (m/s) | Speed of sound from pressure and entropy |
+///
+/// ## Transport properties
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `my_pT` | `p` (bar) | `T` (°C) | `mu` (Pa·s) | Dynamic viscosity from pressure and temperature |
+/// | `my_ph` | `p` (bar) | `h` (kJ/kg) | `mu` (Pa·s) | Dynamic viscosity from pressure and enthalpy |
+/// | `my_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `mu` (Pa·s) | Dynamic viscosity from pressure and entropy |
+/// | `tcL_p` | `p` (bar) | - | `k` (W/(m·K)) | Saturated liquid thermal conductivity at pressure |
+/// | `tcV_p` | `p` (bar) | - | `k` (W/(m·K)) | Saturated vapor thermal conductivity at pressure |
+/// | `tcL_T` | `T` (°C) | - | `k` (W/(m·K)) | Saturated liquid thermal conductivity at temperature |
+/// | `tcV_T` | `T` (°C) | - | `k` (W/(m·K)) | Saturated vapor thermal conductivity at temperature |
+/// | `tc_pT` | `p` (bar) | `T` (°C) | `k` (W/(m·K)) | Thermal conductivity from pressure and temperature |
+/// | `tc_ph` | `p` (bar) | `h` (kJ/kg) | `k` (W/(m·K)) | Thermal conductivity from pressure and enthalpy |
+/// | `tc_hs` | `h` (kJ/kg) | `s` (kJ/(kg·K)) | `k` (W/(m·K)) | Thermal conductivity from enthalpy and entropy |
+/// | `st_T` | `T` (°C) | - | `sigma` (N/m) | Surface tension from temperature |
+/// | `st_p` | `p` (bar) | - | `sigma` (N/m) | Surface tension at saturation temperature for pressure |
+///
+/// ## Quality and void fraction
+///
+/// | Name | in1 | in2 | Output | Description |
+/// |---|---|---|---|---|
+/// | `x_ph` | `p` (bar) | `h` (kJ/kg) | `x` (-) | Vapor quality from pressure and enthalpy |
+/// | `x_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `x` (-) | Vapor quality from pressure and entropy |
+/// | `vx_ph` | `p` (bar) | `h` (kJ/kg) | `vx` (-) | Vapor volume fraction from pressure and enthalpy |
+/// | `vx_ps` | `p` (bar) | `s` (kJ/(kg·K)) | `vx` (-) | Vapor volume fraction from pressure and entropy |
+///
+/// The supported function names are intended to match XSteam.m. See also
+/// [XSteam.m#L3826-L3829](file:///d:/5.code/xsteamrs/XSteam.m#L3826-L3829).
 pub fn props(fun: &str, in1: f64, in2: f64) -> If97Result<f64> {
     let f = fun.trim().to_ascii_lowercase();
     match f.as_str() {
